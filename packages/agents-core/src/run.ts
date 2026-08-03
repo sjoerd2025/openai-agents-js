@@ -131,9 +131,14 @@ import {
 import {
   getImplicitModelSettingsForResolvedModel,
   validateToolExecutionConfig,
+  validateToolNameCollisionPolicy,
   type ToolExecutionConfig,
+  type ToolNameCollisionPolicy,
 } from './runner/runConfig';
-export type { ToolExecutionConfig } from './runner/runConfig';
+export type {
+  ToolExecutionConfig,
+  ToolNameCollisionPolicy,
+} from './runner/runConfig';
 
 function hasPersistedToolOutput(state: RunState<any, any>): boolean {
   return state._generatedItems
@@ -303,6 +308,16 @@ export type RunConfig = {
   toolNotFoundBehavior?: ToolNotFoundBehavior;
 
   /**
+   * Controls collisions between enabled function tool and handoff names.
+   *
+   * - `warn` logs an actionable warning and exposes only the current dispatch winner.
+   * - `error` raises `UserError` before the model is called.
+   *
+   * Defaults to `warn`. Existing strict validation for namespaced and deferred tools is unchanged.
+   */
+  toolNameCollisionPolicy?: ToolNameCollisionPolicy;
+
+  /**
    * Customizes how session history is combined with the current turn's input.
    * When omitted, history items are appended before the new input.
    */
@@ -347,6 +362,7 @@ type SharedRunOptions<
   sandbox?: SandboxRunConfig;
   toolExecution?: ToolExecutionConfig;
   toolNotFoundBehavior?: ToolNotFoundBehavior;
+  toolNameCollisionPolicy?: ToolNameCollisionPolicy;
   /**
    * Error handlers keyed by error kind.
    */
@@ -479,6 +495,9 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
       sandbox: config.sandbox,
       toolExecution: validateToolExecutionConfig(config.toolExecution),
       toolNotFoundBehavior: config.toolNotFoundBehavior ?? 'raise_error',
+      toolNameCollisionPolicy: validateToolNameCollisionPolicy(
+        config.toolNameCollisionPolicy,
+      ),
       sessionInputCallback: config.sessionInputCallback,
       callModelInputFilter: config.callModelInputFilter,
       toolErrorFormatter: config.toolErrorFormatter,
@@ -585,6 +604,10 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
     );
     const toolNotFoundBehavior =
       resolvedOptions.toolNotFoundBehavior ?? this.config.toolNotFoundBehavior;
+    const toolNameCollisionPolicy = validateToolNameCollisionPolicy(
+      resolvedOptions.toolNameCollisionPolicy ??
+        this.config.toolNameCollisionPolicy,
+    );
     const hasCallModelInputFilter = Boolean(callModelInputFilter);
     const tracingConfig = mergeTracingConfig(
       this.config.tracing,
@@ -604,6 +627,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
       reasoningItemIdPolicy,
       toolExecution,
       toolNotFoundBehavior,
+      toolNameCollisionPolicy,
       tracing: tracingConfig,
     };
     const useTaskAndTurnSpans =
@@ -850,11 +874,14 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
       typeof options.toolExecution !== 'undefined';
     const hasToolNotFoundBehaviorOverride =
       typeof options.toolNotFoundBehavior !== 'undefined';
+    const hasToolNameCollisionPolicyOverride =
+      typeof options.toolNameCollisionPolicy !== 'undefined';
     const hasTracingOverride = typeof options.tracing !== 'undefined';
     if (
       !hasSandboxOverride &&
       !hasToolExecutionOverride &&
       !hasToolNotFoundBehaviorOverride &&
+      !hasToolNameCollisionPolicyOverride &&
       !hasTracingOverride
     ) {
       return this.config;
@@ -867,6 +894,9 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
         : {}),
       ...(hasToolNotFoundBehaviorOverride
         ? { toolNotFoundBehavior: options.toolNotFoundBehavior }
+        : {}),
+      ...(hasToolNameCollisionPolicyOverride
+        ? { toolNameCollisionPolicy: options.toolNameCollisionPolicy }
         : {}),
       ...(hasTracingOverride ? { tracing: options.tracing } : {}),
     };
@@ -1044,6 +1074,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
               runConfigModel: await this.#resolveSandboxRuntimeModelForAgent(
                 state._currentAgent,
               ),
+              toolNameCollisionPolicy: options.toolNameCollisionPolicy,
               tracingParent:
                 getRunStateTurnSpanParent(state) ?? state._currentAgentSpan,
             });
@@ -1161,6 +1192,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
             const artifacts = await prepareAgentArtifacts(
               state,
               preparedSandboxAgent.executionAgent,
+              options.toolNameCollisionPolicy,
             );
             const preparedCall = await this.#prepareModelCall(
               state,
@@ -1562,6 +1594,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
             runConfigModel: await this.#resolveSandboxRuntimeModelForAgent(
               result.state._currentAgent,
             ),
+            toolNameCollisionPolicy: options.toolNameCollisionPolicy,
             tracingParent:
               getRunStateTurnSpanParent(result.state) ??
               result.state._currentAgentSpan,
@@ -1693,6 +1726,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
           const artifacts = await prepareAgentArtifacts(
             result.state,
             preparedSandboxAgent.executionAgent,
+            options.toolNameCollisionPolicy,
           );
 
           const preparedCall = await this.#prepareModelCall(
@@ -2288,6 +2322,7 @@ export class Runner extends RunHooks<any, AgentOutputType<unknown>> {
         !hasExplicitTopLevelReasoningEffort(agentModelSettings),
       tracingParent:
         getRunStateTurnSpanParent(state) ?? state._currentAgentSpan,
+      toolNameCollisionPolicy: options.toolNameCollisionPolicy ?? 'warn',
     };
 
     let modelSettings = mergeModelSettings(

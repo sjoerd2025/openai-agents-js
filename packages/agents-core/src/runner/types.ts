@@ -20,6 +20,7 @@ import type * as protocol from '../types/protocol';
 import type { ModelInputData } from './conversation';
 import type { Span } from '../tracing/spans';
 import type { Trace } from '../tracing/traces';
+import type { ToolNameCollisionPolicy } from './runConfig';
 
 export type ToolRunHandoff = {
   toolCall: protocol.FunctionCallItem;
@@ -84,6 +85,7 @@ export type PreparedModelCall<TContext = UnknownContext> =
     modelRequestInternal: {
       reasoningEffortImplicit: boolean;
       tracingParent?: Span<any> | Trace;
+      toolNameCollisionPolicy: ToolNameCollisionPolicy;
     };
     modelSettings: ModelSettings;
     modelInput: ModelInputData;

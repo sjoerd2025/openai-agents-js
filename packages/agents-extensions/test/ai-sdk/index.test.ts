@@ -9,7 +9,14 @@ import {
   toolChoiceToLanguageV2Format,
   toolToLanguageV2Tool,
 } from '../../src/ai-sdk/index';
-import { Agent, protocol, run, withTrace, UserError } from '@openai/agents';
+import {
+  Agent,
+  protocol,
+  run,
+  setSensitiveDataLoggingEnabled,
+  withTrace,
+  UserError,
+} from '@openai/agents';
 import { ReadableStream } from 'node:stream/web';
 import {
   APICallError,
@@ -2845,6 +2852,166 @@ describe('AiSdkModel.getResponse', () => {
     expect(doGenerate).not.toHaveBeenCalled();
   });
 
+  test('rejects flattened namespace and handoff name collisions in doGenerate', async () => {
+    const doGenerate = vi.fn();
+    const model = new AiSdkModel(
+      stubModel({
+        async doGenerate(...args: any[]) {
+          return doGenerate(...args);
+        },
+      }),
+    );
+
+    await expect(
+      withTrace('t', () =>
+        model.getResponse({
+          input: 'hi',
+          tools: [
+            {
+              type: 'function',
+              name: 'lookup',
+              namespace: 'crm',
+              description: 'Look up a CRM record.',
+              parameters: {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            } as any,
+          ],
+          handoffs: [
+            {
+              toolName: 'crm.lookup',
+              toolDescription: 'Handoff with the same flattened name.',
+              inputJsonSchema: {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+              strictJsonSchema: true,
+            },
+          ],
+          modelSettings: {},
+          outputType: 'text',
+          tracing: false,
+          _internal: { toolNameCollisionPolicy: 'error' },
+        } as any),
+      ),
+    ).rejects.toThrow(
+      'AiSdkModel cannot disambiguate function tools and handoffs with the same flattened name.',
+    );
+    expect(doGenerate).not.toHaveBeenCalled();
+  });
+
+  test('warns by default and exposes only the flattened handoff winner in doGenerate', async () => {
+    allowConsole(['warn']);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setSensitiveDataLoggingEnabled(true);
+    const doGenerate = vi.fn(async (_options: any): Promise<any> => ({
+      content: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      response: { id: 'id' },
+      providerMetadata: {},
+      finishReason: 'stop',
+      warnings: [],
+    }));
+    const model = new AiSdkModel(stubModel({ doGenerate }));
+
+    try {
+      await withTrace('t', () =>
+        model.getResponse({
+          input: 'hi',
+          tools: [
+            {
+              type: 'function',
+              name: 'lookup',
+              namespace: 'crm',
+              description: 'Look up a CRM record.',
+              parameters: {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+            } as any,
+          ],
+          handoffs: [
+            {
+              toolName: 'crm.lookup',
+              toolDescription: 'Handoff with the same flattened name.',
+              inputJsonSchema: {
+                type: 'object',
+                properties: {},
+                additionalProperties: false,
+              },
+              strictJsonSchema: true,
+            },
+          ],
+          modelSettings: {},
+          outputType: 'text',
+          tracing: false,
+        } as any),
+      );
+
+      expect(doGenerate).toHaveBeenCalledTimes(1);
+      expect(doGenerate.mock.calls[0]![0].tools).toEqual([
+        expect.objectContaining({
+          name: 'crm.lookup',
+          description: 'Handoff with the same flattened name.',
+        }),
+      ]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "AI SDK tool name collision detected for 'crm.lookup'. Assign unique tool names or toolNameOverride values, or use distinct namespaces. Only the current dispatch winner will be exposed.",
+      );
+    } finally {
+      setSensitiveDataLoggingEnabled(false);
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('exposes one winner when the same function tool object is repeated in doGenerate', async () => {
+    allowConsole(['warn']);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const doGenerate = vi.fn(async (_options: any): Promise<any> => ({
+      content: [],
+      usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      response: { id: 'id' },
+      providerMetadata: {},
+      finishReason: 'stop',
+      warnings: [],
+    }));
+    const model = new AiSdkModel(stubModel({ doGenerate }));
+    const duplicateTool = {
+      type: 'function',
+      name: 'duplicate',
+      description: 'Repeated tool object.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+    } as any;
+
+    try {
+      await withTrace('t', () =>
+        model.getResponse({
+          input: 'hi',
+          tools: [duplicateTool, duplicateTool],
+          handoffs: [],
+          modelSettings: {},
+          outputType: 'text',
+          tracing: false,
+        } as any),
+      );
+
+      expect(doGenerate.mock.calls[0]![0].tools).toEqual([
+        expect.objectContaining({ name: 'duplicate' }),
+      ]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   test('keeps same-name namespace tool calls distinct from bare tools in doGenerate', async () => {
     allowConsole(['warn']);
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -4986,6 +5153,156 @@ describe('AiSdkModel', () => {
       /cannot disambiguate a hosted tool_search helper from a custom tool or handoff/,
     );
     expect(doStream).not.toHaveBeenCalled();
+  });
+
+  test('rejects flattened namespace and handoff name collisions in streaming mode', async () => {
+    const doStream = vi.fn();
+    const model = new AiSdkModel(
+      stubModel({
+        async doStream(...args: any[]) {
+          return doStream(...args);
+        },
+      }),
+    );
+
+    await expect(async () => {
+      for await (const _event of model.getStreamedResponse({
+        input: 'hi',
+        tools: [
+          {
+            type: 'function',
+            name: 'lookup',
+            namespace: 'crm',
+            description: 'Look up a CRM record.',
+            parameters: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+          } as any,
+        ],
+        handoffs: [
+          {
+            toolName: 'crm.lookup',
+            toolDescription: 'Handoff with the same flattened name.',
+            inputJsonSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+            strictJsonSchema: true,
+          },
+        ],
+        modelSettings: {},
+        outputType: 'text',
+        tracing: false,
+        _internal: { toolNameCollisionPolicy: 'error' },
+      } as any)) {
+        void _event;
+      }
+    }).rejects.toThrow(
+      'AiSdkModel cannot disambiguate function tools and handoffs with the same flattened name.',
+    );
+    expect(doStream).not.toHaveBeenCalled();
+  });
+
+  test('warns by default and exposes only the flattened handoff winner in streaming mode', async () => {
+    allowConsole(['warn']);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    setSensitiveDataLoggingEnabled(true);
+    const doStream = vi.fn(async (_options: any): Promise<any> => ({
+      stream: partsStream([]),
+    }));
+    const model = new AiSdkModel(stubModel({ doStream }));
+
+    try {
+      for await (const _event of model.getStreamedResponse({
+        input: 'hi',
+        tools: [
+          {
+            type: 'function',
+            name: 'lookup',
+            namespace: 'crm',
+            description: 'Look up a CRM record.',
+            parameters: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+          } as any,
+        ],
+        handoffs: [
+          {
+            toolName: 'crm.lookup',
+            toolDescription: 'Handoff with the same flattened name.',
+            inputJsonSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+            strictJsonSchema: true,
+          },
+        ],
+        modelSettings: {},
+        outputType: 'text',
+        tracing: false,
+      } as any)) {
+        void _event;
+      }
+
+      expect(doStream).toHaveBeenCalledTimes(1);
+      expect(doStream.mock.calls[0]![0].tools).toEqual([
+        expect.objectContaining({
+          name: 'crm.lookup',
+          description: 'Handoff with the same flattened name.',
+        }),
+      ]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        "AI SDK tool name collision detected for 'crm.lookup'. Assign unique tool names or toolNameOverride values, or use distinct namespaces. Only the current dispatch winner will be exposed.",
+      );
+    } finally {
+      setSensitiveDataLoggingEnabled(false);
+      warnSpy.mockRestore();
+    }
+  });
+
+  test('exposes one winner when the same function tool object is repeated in streaming mode', async () => {
+    allowConsole(['warn']);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const doStream = vi.fn(async (_options: any): Promise<any> => ({
+      stream: partsStream([]),
+    }));
+    const model = new AiSdkModel(stubModel({ doStream }));
+    const duplicateTool = {
+      type: 'function',
+      name: 'duplicate',
+      description: 'Repeated tool object.',
+      parameters: {
+        type: 'object',
+        properties: {},
+        additionalProperties: false,
+      },
+    } as any;
+
+    try {
+      for await (const _event of model.getStreamedResponse({
+        input: 'hi',
+        tools: [duplicateTool, duplicateTool],
+        handoffs: [],
+        modelSettings: {},
+        outputType: 'text',
+        tracing: false,
+      } as any)) {
+        void _event;
+      }
+
+      expect(doStream.mock.calls[0]![0].tools).toEqual([
+        expect.objectContaining({ name: 'duplicate' }),
+      ]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   describe('parseArguments', () => {

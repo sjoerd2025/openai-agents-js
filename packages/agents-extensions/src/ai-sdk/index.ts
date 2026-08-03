@@ -910,16 +910,59 @@ function expectsObjectArguments(
   return false;
 }
 
-function buildRequestedToolsByName(
-  request: Pick<ModelRequest, 'tools' | 'handoffs'>,
-): Map<string, SerializedTool | SerializedHandoff> {
+function resolveRequestedTools(
+  request: Pick<ModelRequest, 'tools' | 'handoffs'> & {
+    _internal?: { toolNameCollisionPolicy?: 'warn' | 'error' };
+  },
+  logger: ReturnType<typeof getLogger>,
+): {
+  tools: SerializedTool[];
+  handoffs: SerializedHandoff[];
+  toolsByName: Map<string, SerializedTool | SerializedHandoff>;
+} {
   const toolsByName = new Map<string, SerializedTool | SerializedHandoff>();
+  const retainedToolIndices = new Set(request.tools.map((_, index) => index));
+  const retainedHandoffIndices = new Set(
+    request.handoffs.map((_, index) => index),
+  );
+  const entriesByName = new Map<
+    string,
+    { kind: 'tool' | 'handoff'; index: number }
+  >();
+  const collisionPolicy = request._internal?.toolNameCollisionPolicy ?? 'warn';
 
   const addRequestedTool = (
     name: string,
     tool: SerializedTool | SerializedHandoff,
+    entry: { kind: 'tool' | 'handoff'; index: number },
   ) => {
     const existing = toolsByName.get(name);
+    if (
+      existing &&
+      isFunctionToolOrHandoff(existing) &&
+      isFunctionToolOrHandoff(tool)
+    ) {
+      const remediation =
+        'Assign unique tool names or toolNameOverride values, or use distinct namespaces.';
+      if (collisionPolicy === 'error') {
+        throw new UserError(
+          logger.dontLogToolData
+            ? `AiSdkModel cannot disambiguate function tools and handoffs with the same flattened name. ${remediation}`
+            : `AiSdkModel cannot disambiguate the flattened tool name '${name}'. ${remediation}`,
+        );
+      }
+      logger.warn(
+        logger.dontLogToolData
+          ? `AI SDK tool name collision detected. ${remediation} Only the current dispatch winner will be exposed.`
+          : `AI SDK tool name collision detected for '${name}'. ${remediation} Only the current dispatch winner will be exposed.`,
+      );
+      const existingEntry = entriesByName.get(name)!;
+      if (existingEntry.kind === 'tool') {
+        retainedToolIndices.delete(existingEntry.index);
+      } else {
+        retainedHandoffIndices.delete(existingEntry.index);
+      }
+    }
     if (
       name === 'tool_search' &&
       existing &&
@@ -931,22 +974,40 @@ function buildRequestedToolsByName(
     }
 
     toolsByName.set(name, tool);
+    if (isFunctionToolOrHandoff(tool)) {
+      entriesByName.set(name, entry);
+    } else {
+      entriesByName.delete(name);
+    }
   };
 
-  for (const tool of request.tools) {
+  for (const [index, tool] of request.tools.entries()) {
     addRequestedTool(
       tool.type === 'function'
         ? getSerializedFunctionToolName(tool)
         : tool.name,
       tool,
+      { kind: 'tool', index },
     );
   }
 
-  for (const handoff of request.handoffs) {
-    addRequestedTool(handoff.toolName, handoff);
+  for (const [index, handoff] of request.handoffs.entries()) {
+    addRequestedTool(handoff.toolName, handoff, { kind: 'handoff', index });
   }
 
-  return toolsByName;
+  return {
+    tools: request.tools.filter((_, index) => retainedToolIndices.has(index)),
+    handoffs: request.handoffs.filter((_, index) =>
+      retainedHandoffIndices.has(index),
+    ),
+    toolsByName,
+  };
+}
+
+function isFunctionToolOrHandoff(
+  tool: SerializedTool | SerializedHandoff,
+): boolean {
+  return 'toolName' in tool || tool.type === 'function';
 }
 
 function isHostedToolSearchTool(
@@ -1794,11 +1855,15 @@ export class AiSdkModel implements Model {
           ];
         }
 
+        const resolvedRequestedTools = resolveRequestedTools(
+          request,
+          this.#logger,
+        );
         const tools = [
-          ...request.tools.map((tool) =>
+          ...resolvedRequestedTools.tools.map((tool) =>
             toolToLanguageV2Tool(this.#model, tool),
           ),
-          ...request.handoffs.map((handoff) =>
+          ...resolvedRequestedTools.handoffs.map((handoff) =>
             handoffToLanguageV2Tool(this.#model, handoff),
           ),
         ];
@@ -1811,7 +1876,7 @@ export class AiSdkModel implements Model {
           throw new UserError('Zod output type is not yet supported');
         }
 
-        const requestedToolsByName = buildRequestedToolsByName(request);
+        const requestedToolsByName = resolvedRequestedTools.toolsByName;
 
         const responseFormat: LanguageModelV2CallOptions['responseFormat'] =
           getResponseFormat(request.outputType);
@@ -2084,9 +2149,15 @@ export class AiSdkModel implements Model {
         ];
       }
 
+      const resolvedRequestedTools = resolveRequestedTools(
+        request,
+        this.#logger,
+      );
       const tools = [
-        ...request.tools.map((tool) => toolToLanguageV2Tool(this.#model, tool)),
-        ...request.handoffs.map((handoff) =>
+        ...resolvedRequestedTools.tools.map((tool) =>
+          toolToLanguageV2Tool(this.#model, tool),
+        ),
+        ...resolvedRequestedTools.handoffs.map((handoff) =>
           handoffToLanguageV2Tool(this.#model, handoff),
         ),
       ];
@@ -2113,7 +2184,7 @@ export class AiSdkModel implements Model {
         abortSignal: request.signal,
         ...(request.modelSettings.providerData ?? {}),
       };
-      const requestedToolsByName = buildRequestedToolsByName(request);
+      const requestedToolsByName = resolvedRequestedTools.toolsByName;
 
       if (this.#logger.dontLogModelData) {
         this.#logger.debug('Request received (streamed)');
