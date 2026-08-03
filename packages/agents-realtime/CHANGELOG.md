@@ -1,5 +1,16 @@
 # @openai/agents-realtime
 
+## 0.14.3
+
+### Patch Changes
+
+- 73cce94: fix: apply realtime output guardrails to text deltas
+- Updated dependencies [1154aa0]
+- Updated dependencies [9cbba54]
+- Updated dependencies [0f9b12e]
+- Updated dependencies [1eaa425]
+  - @openai/agents-core@0.14.3
+
 ## 0.14.2
 
 ### Patch Changes

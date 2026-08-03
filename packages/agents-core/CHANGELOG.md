@@ -1,5 +1,14 @@
 # @openai/agents-core
 
+## 0.14.3
+
+### Patch Changes
+
+- 1154aa0: fix: include every paginated MCP tool in agent tool discovery
+- 9cbba54: fix: preserve approved tool results when output guardrails trip
+- 0f9b12e: fix: normalize closed typeless object schemas in strict tools
+- 1eaa425: fix: ignore invalid environment paths for default sandbox snapshots
+
 ## 0.14.2
 
 ### Patch Changes
